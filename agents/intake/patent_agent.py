@@ -1,0 +1,168 @@
+# agents/intake/patent_agent.py
+"""
+Patent Agent - Fetches patents from USPTO and EPO APIs
+No API key required for basic usage
+"""
+
+import httpx
+import json
+import time
+from dataclasses import dataclass
+from typing import Optional
+from loguru import logger
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass
+class Patent:
+    patent_id: str
+    title: str
+    abstract: str
+    claims: str
+    inventors: list[str]
+    assignee: str
+    filing_date: str
+    publication_date: str
+    source: str  # "USPTO" or "EPO"
+    url: str
+
+
+class PatentAgent:
+    """Fetches patents from USPTO full-text search API (no key required)"""
+
+    USPTO_BASE = "https://efts.uspto.gov/LATEST/search-fields"
+    EPO_BASE = "https://ops.epo.org/3.2/rest-services"
+
+    def __init__(self, max_results: int = 20):
+        self.max_results = max_results
+        self.client = httpx.Client(timeout=30.0)
+        logger.info("PatentAgent initialized")
+
+    def search_uspto(self, query: str) -> list[Patent]:
+        """Search USPTO patents by keyword query"""
+        logger.info(f"Searching USPTO for: {query}")
+        patents = []
+
+        try:
+            params = {
+                "q": query,
+                "hits.hits.total.value": self.max_results,
+                "hits.hits._source.patentTitle": True,
+                "hits.hits._source.patentAbstract": True,
+            }
+
+            url = f"https://efts.uspto.gov/LATEST/search-fields?q={query}&dateRangeData.startdate=2015-01-01"
+            response = self.client.get(url)
+
+            if response.status_code == 200:
+                data = response.json()
+                hits = data.get("hits", {}).get("hits", [])
+
+                for hit in hits[:self.max_results]:
+                    source = hit.get("_source", {})
+                    patent = Patent(
+                        patent_id=source.get("patentNumber", "N/A"),
+                        title=source.get("patentTitle", "N/A"),
+                        abstract=source.get("patentAbstract", "N/A"),
+                        claims=source.get("independentClaims", "N/A"),
+                        inventors=source.get("inventorName", []),
+                        assignee=source.get("assigneeEntityName", "N/A"),
+                        filing_date=source.get("filingDate", "N/A"),
+                        publication_date=source.get("patentIssueDate", "N/A"),
+                        source="USPTO",
+                        url=f"https://patents.google.com/patent/US{source.get('patentNumber', '')}",
+                    )
+                    patents.append(patent)
+
+                logger.success(f"USPTO: {len(patents)} patents found")
+            else:
+                logger.warning(f"USPTO returned status {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"USPTO search failed: {e}")
+
+        return patents
+
+    def search_arxiv_patents(self, query: str) -> list[Patent]:
+        """
+        Fallback: search Google Patents via Semantic Scholar
+        for patent-like technical documents
+        """
+        logger.info(f"Searching patent literature for: {query}")
+        patents = []
+
+        try:
+            url = "https://api.semanticscholar.org/graph/v1/paper/search"
+            params = {
+                "query": query,
+                "limit": self.max_results,
+                "fields": "title,abstract,authors,year,externalIds,url",
+            }
+            response = self.client.get(url, params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                for paper in data.get("data", []):
+                    patent = Patent(
+                        patent_id=paper.get("paperId", "N/A"),
+                        title=paper.get("title", "N/A"),
+                        abstract=paper.get("abstract", "N/A"),
+                        claims="N/A",
+                        inventors=[a.get("name", "") for a in paper.get("authors", [])],
+                        assignee="N/A",
+                        filing_date="N/A",
+                        publication_date=str(paper.get("year", "N/A")),
+                        source="SemanticScholar",
+                        url=paper.get("url", "N/A"),
+                    )
+                    patents.append(patent)
+
+                logger.success(f"SemanticScholar: {len(patents)} documents found")
+
+        except Exception as e:
+            logger.error(f"SemanticScholar search failed: {e}")
+
+        return patents
+
+    def search(self, query: str) -> list[Patent]:
+        """Main entry point — searches all sources"""
+        results = []
+        results.extend(self.search_uspto(query))
+        time.sleep(1)  # rate limiting
+        results.extend(self.search_arxiv_patents(query))
+        logger.info(f"Total patents/documents found: {len(results)}")
+        return results
+
+    def to_dict(self, patents: list[Patent]) -> list[dict]:
+        """Convert to JSON-serializable format"""
+        return [p.__dict__ for p in patents]
+
+    def close(self):
+        self.client.close()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--query", type=str, default="transformer neural network")
+    parser.add_argument("--limit", type=int, default=10)
+    args = parser.parse_args()
+
+    agent = PatentAgent(max_results=args.limit)
+    patents = agent.search(args.query)
+
+    print(f"\n{'='*60}")
+    print(f"Results for: '{args.query}'")
+    print(f"{'='*60}")
+    for i, p in enumerate(patents, 1):
+        print(f"\n[{i}] {p.title}")
+        print(f"    ID: {p.patent_id}")
+        print(f"    Source: {p.source}")
+        print(f"    Assignee: {p.assignee}")
+        print(f"    Date: {p.publication_date}")
+        print(f"    Abstract: {p.abstract[:200]}...")
+
+    agent.close()
