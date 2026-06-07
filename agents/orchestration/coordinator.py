@@ -18,6 +18,7 @@ from agents.analysis.nlp_agent import NLPAgent, NLPResult
 from agents.analysis.risk_agent import RiskAgent, RiskScore
 from agents.analysis.tech_dd_agent import TechDDAgent, TechnologyDDResult
 from agents.decision.decision_agent import DecisionAgent, DecisionResult
+from agents.reporting.report_agent import ReportAgent, ReportResult
 
 load_dotenv()
 
@@ -37,6 +38,7 @@ class DDCase:
     escalated: bool = False
     decision_result: dict = field(default_factory=dict)
     final_report: dict = field(default_factory=dict)
+    report_result: dict = field(default_factory=dict)
 
 
 class TechDDCoordinator:
@@ -63,6 +65,7 @@ class TechDDCoordinator:
         self.risk_agent = RiskAgent(escalation_threshold=escalation_threshold)
         self.decision_agent = DecisionAgent()
         self.arxiv_only = arxiv_only
+        self.report_agent = ReportAgent()
         logger.info("TechDDCoordinator initialized")
 
     def _generate_case_id(self, query: str) -> str:
@@ -170,7 +173,19 @@ class TechDDCoordinator:
 
         # ── STAGE 6: REPORT ──────────────────────────────────────
         logger.info("STAGE 6: Generating Report")
-        case.final_report = self._generate_report(case, risk, nlp_results)
+        report_result: ReportResult = self.report_agent.generate(
+            case_id=case.case_id,
+            query=case.query,
+            status=case.status,
+            documents=case.documents,
+            term_overlaps=case.term_overlaps,
+            tech_dd_result=case.tech_dd_result,
+            risk_score=case.risk_score,
+            decision_result=case.decision_result,
+        )
+        case.report_result = report_result.__dict__
+        report = report_result.report
+        case.final_report = report
 
         logger.info(f"{'='*60}")
         logger.info(f"CASE COMPLETE: {case_id} → Status: {case.status}")
