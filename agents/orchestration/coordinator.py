@@ -17,6 +17,7 @@ from agents.intake.patent_agent import PatentAgent, Patent
 from agents.analysis.nlp_agent import NLPAgent, NLPResult
 from agents.analysis.risk_agent import RiskAgent, RiskScore
 from agents.analysis.tech_dd_agent import TechDDAgent, TechnologyDDResult
+from agents.decision.decision_agent import DecisionAgent, DecisionResult
 
 load_dotenv()
 
@@ -34,6 +35,7 @@ class DDCase:
     tech_dd_result: dict = field(default_factory=dict)
     risk_score: dict = field(default_factory=dict)
     escalated: bool = False
+    decision_result: dict = field(default_factory=dict)
     final_report: dict = field(default_factory=dict)
 
 
@@ -59,6 +61,7 @@ class TechDDCoordinator:
         self.nlp_agent = NLPAgent()
         self.tech_dd_agent = TechDDAgent()
         self.risk_agent = RiskAgent(escalation_threshold=escalation_threshold)
+        self.decision_agent = DecisionAgent()
         self.arxiv_only = arxiv_only
         logger.info("TechDDCoordinator initialized")
 
@@ -143,14 +146,27 @@ class TechDDCoordinator:
 
         logger.success(f"Risk scoring complete: {risk.overall}/10")
 
-        # ── STAGE 5: DECISION ────────────────────────────────────
-        logger.info("STAGE 5: Decision")
-        if risk.escalate:
+        # ── STAGE 5: DECISION AGENT ─────────────────────────────
+        logger.info("STAGE 5: Decision Agent")
+        decision: DecisionResult = self.decision_agent.decide(
+            risk_score=case.risk_score,
+            tech_dd_result=case.tech_dd_result,
+        )
+        case.decision_result = decision.__dict__
+        case.escalated = decision.requires_human_review
+
+        if decision.requires_human_review:
             case.status = "REVIEW"
-            logger.warning(f"ESCALATED TO HUMAN REVIEW — Risk: {risk.overall}/10")
+            logger.warning(
+                f"Decision Agent routed case to human review: "
+                f"{decision.decision} | Priority={decision.priority}"
+            )
         else:
             case.status = "CLOSED"
-            logger.success(f"Auto-closed — Risk within threshold: {risk.overall}/10")
+            logger.success(
+                f"Decision Agent auto-routed case: "
+                f"{decision.decision} | Stage={decision.routing_stage}"
+            )
 
         # ── STAGE 6: REPORT ──────────────────────────────────────
         logger.info("STAGE 6: Generating Report")
@@ -226,6 +242,14 @@ class TechDDCoordinator:
                 if case.escalated
                 else "APPROVED FOR AUTO-PROCESSING — Risk within acceptable threshold."
             ),
+            "decision": {
+                "decision": case.decision_result.get("decision"),
+                "reason": case.decision_result.get("reason"),
+                "requires_human_review": case.decision_result.get("requires_human_review"),
+                "priority": case.decision_result.get("priority"),
+                "routing_stage": case.decision_result.get("routing_stage"),
+                "actions": case.decision_result.get("actions", []),
+            },
         }
 
         return report
@@ -284,6 +308,21 @@ class TechDDCoordinator:
         print(f"\n  FLAGS")
         for flag in ra["flags"]:
             print(f"  • {flag}")
+
+        decision = r.get("decision", {})
+        if decision:
+            print(f"\n  DECISION AGENT")
+            print(f"  Decision      : {decision.get('decision')}")
+            print(f"  Priority      : {decision.get('priority')}")
+            print(f"  Routing Stage : {decision.get('routing_stage')}")
+            print(f"  Human Review  : {decision.get('requires_human_review')}")
+            print(f"  Reason        : {decision.get('reason')}")
+
+            actions = decision.get("actions", [])
+            if actions:
+                print(f"\n  DECISION ACTIONS")
+                for action in actions:
+                    print(f"  • {action}")
 
         print(f"\n  TOP IP CONFLICT ZONES")
         for item in r["top_overlap_terms"]:
