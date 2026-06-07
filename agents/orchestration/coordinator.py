@@ -16,6 +16,7 @@ from agents.intake.literature_agent import LiteratureAgent, Paper
 from agents.intake.patent_agent import PatentAgent, Patent
 from agents.analysis.nlp_agent import NLPAgent, NLPResult
 from agents.analysis.risk_agent import RiskAgent, RiskScore
+from agents.analysis.tech_dd_agent import TechDDAgent, TechnologyDDResult
 
 load_dotenv()
 
@@ -30,6 +31,7 @@ class DDCase:
     documents: list[dict] = field(default_factory=list)
     nlp_results: list[dict] = field(default_factory=list)
     term_overlaps: dict = field(default_factory=dict)
+    tech_dd_result: dict = field(default_factory=dict)
     risk_score: dict = field(default_factory=dict)
     escalated: bool = False
     final_report: dict = field(default_factory=dict)
@@ -55,6 +57,7 @@ class TechDDCoordinator:
         self.literature_agent = LiteratureAgent(max_results=max_papers)
         self.patent_agent = PatentAgent(max_results=max_patents)
         self.nlp_agent = NLPAgent()
+        self.tech_dd_agent = TechDDAgent()
         self.risk_agent = RiskAgent(escalation_threshold=escalation_threshold)
         self.arxiv_only = arxiv_only
         logger.info("TechDDCoordinator initialized")
@@ -115,16 +118,33 @@ class TechDDCoordinator:
 
         logger.success(f"NLP complete: {len(case.term_overlaps)} overlapping terms found")
 
-        # ── STAGE 3: RISK SCORING ────────────────────────────────
-        logger.info("STAGE 3: Risk Scoring")
-        risk: RiskScore = self.risk_agent.score(case.documents)
+        # ── STAGE 3: TECHNOLOGY DUE DILIGENCE ANALYSIS ─────────────────────
+        logger.info("STAGE 3: Technology Due Diligence Analysis")
+        tech_dd: TechnologyDDResult = self.tech_dd_agent.analyze(
+            documents=case.documents,
+            nlp_results=case.nlp_results,
+        )
+        case.tech_dd_result = tech_dd.__dict__
+
+        logger.success(
+            f"Tech DD complete: signal={tech_dd.overall_signal}, "
+            f"overlap={tech_dd.overlap_score}/10, "
+            f"maturity={tech_dd.maturity_score}/10"
+        )
+
+        # ── STAGE 4: RISK SCORING ────────────────────────────────
+        logger.info("STAGE 4: Risk Scoring")
+        risk: RiskScore = self.risk_agent.score(
+            documents=case.documents,
+            tech_dd_result=case.tech_dd_result,
+        )
         case.risk_score = risk.__dict__
         case.escalated = risk.escalate
 
         logger.success(f"Risk scoring complete: {risk.overall}/10")
 
-        # ── STAGE 4: DECISION ────────────────────────────────────
-        logger.info("STAGE 4: Decision")
+        # ── STAGE 5: DECISION ────────────────────────────────────
+        logger.info("STAGE 5: Decision")
         if risk.escalate:
             case.status = "REVIEW"
             logger.warning(f"ESCALATED TO HUMAN REVIEW — Risk: {risk.overall}/10")
@@ -132,8 +152,8 @@ class TechDDCoordinator:
             case.status = "CLOSED"
             logger.success(f"Auto-closed — Risk within threshold: {risk.overall}/10")
 
-        # ── STAGE 5: REPORT ──────────────────────────────────────
-        logger.info("STAGE 5: Generating Report")
+        # ── STAGE 6: REPORT ──────────────────────────────────────
+        logger.info("STAGE 6: Generating Report")
         case.final_report = self._generate_report(case, risk, nlp_results)
 
         logger.info(f"{'='*60}")
@@ -180,6 +200,15 @@ class TechDDCoordinator:
                 "total_key_terms": len(all_terms),
                 "overlapping_terms": len(case.term_overlaps),
             },
+            "technology_due_diligence": {
+                "novelty_score": case.tech_dd_result.get("novelty_score"),
+                "overlap_score": case.tech_dd_result.get("overlap_score"),
+                "maturity_score": case.tech_dd_result.get("maturity_score"),
+                "evidence_score": case.tech_dd_result.get("evidence_score"),
+                "overall_signal": case.tech_dd_result.get("overall_signal"),
+                "findings": case.tech_dd_result.get("findings", []),
+                "evidence_items": case.tech_dd_result.get("evidence_items", []),
+            },
             "risk_assessment": {
                 "overall_score": risk.overall,
                 "ip_risk": risk.ip_risk,
@@ -222,6 +251,27 @@ class TechDDCoordinator:
         print(f"  Total    : {s['total_documents']}")
         for src, count in s["source_breakdown"].items():
             print(f"  {src:<20}: {count}")
+
+        tdd = r.get("technology_due_diligence", {})
+        if tdd:
+            print(f"\n  TECHNOLOGY DUE DILIGENCE")
+            print(f"  Overall Signal   : {tdd.get('overall_signal')}")
+            print(f"  Novelty Score    : {tdd.get('novelty_score')}/10")
+            print(f"  Overlap Score    : {tdd.get('overlap_score')}/10")
+            print(f"  Maturity Score   : {tdd.get('maturity_score')}/10")
+            print(f"  Evidence Score   : {tdd.get('evidence_score')}/10")
+
+            findings = tdd.get("findings", [])
+            if findings:
+                print(f"\n  TECH DD FINDINGS")
+                for finding in findings:
+                    print(f"  • {finding}")
+
+            evidence_items = tdd.get("evidence_items", [])
+            if evidence_items:
+                print(f"\n  TECH DD EVIDENCE ITEMS")
+                for item in evidence_items[:5]:
+                    print(f"  • {item}")
 
         ra = r["risk_assessment"]
         print(f"\n  RISK SCORES (0-10, higher = more risk)")
