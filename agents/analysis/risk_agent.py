@@ -166,7 +166,7 @@ class RiskAgent:
 
         return round(consistency_score, 2), flags
 
-    def score(self, documents: list[dict]) -> RiskScore:
+    def score(self, documents: list[dict], tech_dd_result: dict | None = None) -> RiskScore:
         """Main entry point — score a list of documents"""
         if not documents:
             logger.warning("No documents provided to RiskAgent")
@@ -184,17 +184,47 @@ class RiskAgent:
         consistency, cons_flags = self._assess_consistency(documents)
 
         # Overall risk: weighted average
-        # IP risk weighted highest, maturity risk is inverse
+        # V2 combines rule-based signals with Technology DD agent outputs.
         maturity_risk = 10.0 - tech_maturity
-        overall = (
-            ip_risk * 0.35 +
-            maturity_risk * 0.25 +
-            competitive * 0.20 +
-            (10.0 - consistency) * 0.20
+        base_overall = (
+                ip_risk * 0.35 +
+                maturity_risk * 0.25 +
+                competitive * 0.20 +
+                (10.0 - consistency) * 0.20
         )
+
+        tech_dd_risk = 0.0
+        if tech_dd_result:
+            overlap_score = float(tech_dd_result.get("overlap_score", 0.0) or 0.0)
+            evidence_score = float(tech_dd_result.get("evidence_score", 0.0) or 0.0)
+            tech_maturity_score = float(tech_dd_result.get("maturity_score", 5.0) or 5.0)
+            overall_signal = tech_dd_result.get("overall_signal", "")
+
+            tech_dd_risk = (
+                    overlap_score * 0.45 +
+                    (10.0 - tech_maturity_score) * 0.25 +
+                    (10.0 - evidence_score) * 0.20
+            )
+
+            if overall_signal == "HIGH_TECHNICAL_OVERLAP":
+                tech_dd_risk = min(tech_dd_risk + 1.5, 10.0)
+                all_signal_note = "Technology DD Agent detected high technical overlap."
+            elif overall_signal == "INSUFFICIENT_EVIDENCE":
+                tech_dd_risk = min(tech_dd_risk + 1.0, 10.0)
+                all_signal_note = "Technology DD Agent reported insufficient evidence."
+            else:
+                all_signal_note = f"Technology DD Agent signal: {overall_signal}"
+
+            all_flags = ip_flags + maturity_flags + comp_flags + cons_flags
+            all_flags.append(all_signal_note)
+
+            overall = base_overall * 0.55 + tech_dd_risk * 0.45
+        else:
+            all_flags = ip_flags + maturity_flags + comp_flags + cons_flags
+            overall = base_overall
+
         overall = round(min(overall, 10.0), 2)
 
-        all_flags = ip_flags + maturity_flags + comp_flags + cons_flags
         escalate = overall >= self.escalation_threshold
 
         if escalate:
